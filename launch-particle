@@ -1,0 +1,105 @@
+#!/bin/bash
+#
+# Set up a never-ending sequence in which the script mutates itself and
+# copies the mutated version in order through a wrapped list of mirror servers.
+#
+# The easiest way to stop it once it has started is to shut down one of the
+# mirror servers.
+#
+
+#----------------------------------------------------------------------
+# Set up values.
+#----------------------------------------------------------------------
+
+# User for logging in to all of the defined mirror boxes.
+USER=vagrant
+PASS=vagrant
+
+# Temp directory for various transient files.
+TMP=/tmp
+
+# List of mirror boxes.
+MIRRORS=( 192.168.99.10 192.168.99.11 192.168.99.12 192.168.99.13 )
+# Index of the next mirror to bounce from.
+INDEX=0
+# How long in seconds between reflections.
+FLIGHT_TIME=2
+
+# Get the path to this script.
+SCRIPT=`basename "$0"`
+SCRIPT_PATH="$( cd "$( dirname "$0" )" && pwd)"/$SCRIPT
+
+#----------------------------------------------------------------------
+# Reflection operation.
+#----------------------------------------------------------------------
+
+# Going for metallic noises it seems.
+BOUNCES=( clang clank ping plink tink )
+BOUNCE=${BOUNCES[$RANDOM % ${#BOUNCES[@]} ]}
+echo "$BOUNCE" | sudo wall -n
+
+#----------------------------------------------------------------------
+# Create a mutated copy of this script.
+#----------------------------------------------------------------------
+
+# Create a temp copy of this script.
+TMP_SCRIPT=`hexdump -n 16 -v -e '/1 "%02X"' /dev/urandom`
+TMP_SCRIPT_PATH=$TMP/pow-$TMP_SCRIPT
+cp $SCRIPT_PATH $TMP_SCRIPT_PATH
+
+# Edit the temp script to move the mirror index up by one, wrapping back to
+# index 0 when passing the end of the MIRRORS array.
+INDEX_NEXT=$((INDEX + 1))
+if [ $INDEX_NEXT -ge ${#MIRRORS[*]} ]; then
+  INDEX_NEXT=0
+fi
+# Using unicode \x3d for = to stop this line getting replaced as well.
+sed -i "s/INDEX\x3d[0-9]*/INDEX\x3d$INDEX_NEXT/g" $TMP_SCRIPT_PATH
+
+#----------------------------------------------------------------------
+# Create a temp script to echo the SSH password, used by SSH_ASKPASS
+#----------------------------------------------------------------------
+
+TMP_SSH_ASKPASS_SCRIPT_PATH=$TMP/pow-pass-$TMP_SCRIPT
+cat > $TMP_SSH_ASKPASS_SCRIPT_PATH <<EOL
+#!/bin/bash
+echo "$PASS"
+EOL
+chmod u+x $TMP_SSH_ASKPASS_SCRIPT_PATH
+
+#----------------------------------------------------------------------
+# Send the main script off to the next mirror and run it there.
+#----------------------------------------------------------------------
+
+# This is the part that will start to fail on some Linux versions, I would
+# imagine. Lots of assumptions about how exactly ssh interacts with terminals
+# and subprocesses.
+
+# Load in a base 64 encoded version of the script.
+B64_SCRIPT=`base64 --wrap=0 $TMP_SCRIPT_PATH`
+
+# Set no display, necessary for ssh to play nice with setsid and SSH_ASKPASS.
+export DISPLAY=:0
+# Tell SSH to read in the output of the provided script as the password.
+# We still have to use setsid to eliminate access to a terminal and thus avoid
+# it ignoring this and asking for a password.
+export SSH_ASKPASS=$TMP_SSH_ASKPASS_SCRIPT_PATH
+# LogLevel error is to suppress the adding hosts warning.
+SSH_OPTIONS="-oLogLevel=error -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null"
+
+# Log in to the next mirror, copy over the code, and run the code. The use of
+# setsid is a part of the machinations to stop ssh asking for a password.
+setsid ssh $SSH_OPTIONS $USER@${MIRRORS[$INDEX_NEXT]} \
+"base64 -d - > $TMP_SCRIPT_PATH <<< $B64_SCRIPT; chmod u+x $TMP_SCRIPT_PATH; sh -c 'sleep 2; nohup $TMP_SCRIPT_PATH > /dev/null 2>&1 &'"
+
+#----------------------------------------------------------------------
+# Clean up.
+#----------------------------------------------------------------------
+
+# Delete the temp scripts created in this run.
+rm -f $TMP_SCRIPT_PATH $TMP_SSH_ASKPASS_SCRIPT_PATH
+
+# Is this script itself a temp script created in a past run? If so, delete it.
+if [[ $SCRIPT_PATH =~ ^$TMP ]] ; then
+  rm -f $SCRIPT_PATH
+fi
